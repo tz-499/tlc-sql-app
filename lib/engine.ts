@@ -39,6 +39,23 @@ export type ColumnStats = {
     type: string;
 } & (NumericStats | CategoricalStats);
 
+// Charting
+export type HistogramBin = { label: string; count: number };
+export type HistogramData = { kind: "histogram"; bins: HistogramBin[] };
+
+export type BarPoint = { label: string; count: number };
+export type BarData = { kind: "bar"; points: BarPoint[] };
+
+// Testing
+export type StepStatus = "pending" | "pass" | "fail" | "skipped";
+
+export type E2EStep = {
+  name: string;
+  status: StepStatus;
+  detail?: string;
+};
+
+
 // ----------------------------- Function Exports ------------------------------
 
 // --------------------------- L4: Dataset Creation  ---------------------------
@@ -238,3 +255,88 @@ export async function getColumnStats(name: string, type: string): Promise<Column
         await conn.close();
     }
 }
+
+// ------------------------------- L8: Charting  -------------------------------
+export async function getNumericHistogram(
+    colName: string,
+    minVal: number,
+    maxVal: number,
+    bins = 20
+  ): Promise<HistogramData> {
+    const db = await getDB();
+    const conn = await db.connect();
+    const col = quoteIdent(colName);
+  
+    try {
+      if (!Number.isFinite(minVal) || !Number.isFinite(maxVal) || bins <= 0 || minVal === maxVal) {
+        return {
+          kind: "histogram",
+          bins: [{ label: `${minVal}`, count: 0 }],
+        };
+      }
+  
+      const width = (maxVal - minVal) / bins;
+  
+      // Bin index in [0, bins-1]
+      const res = await conn.query(`
+        WITH base AS (
+          SELECT
+            CASE
+              WHEN ${col} IS NULL THEN NULL
+              WHEN ${col} = ${maxVal} THEN ${bins - 1}
+              ELSE CAST(FLOOR((${col} - ${minVal}) / ${width}) AS INTEGER)
+            END AS b
+          FROM tablename
+          WHERE ${col} IS NOT NULL
+        )
+        SELECT b, COUNT(*)::BIGINT AS n
+        FROM base
+        WHERE b IS NOT NULL AND b >= 0 AND b < ${bins}
+        GROUP BY 1
+        ORDER BY 1;
+      `);
+  
+      // Fill missing bins with 0s
+      const counts = new Array<number>(bins).fill(0);
+      for (const r of res.toArray() as any[]) {
+        counts[Number(r.b)] = Number(r.n);
+      }
+  
+      const outBins: HistogramBin[] = counts.map((c, i) => {
+        const a = minVal + i * width;
+        const b = minVal + (i + 1) * width;
+        return { label: `${a.toFixed(2)}–${b.toFixed(2)}`, count: c };
+      });
+  
+      return { kind: "histogram", bins: outBins };
+    } finally {
+      await conn.close();
+    }
+  }
+
+  export async function getCategoricalBar(colName: string, k = 15): Promise<BarData> {
+    const db = await getDB();
+    const conn = await db.connect();
+    const col = quoteIdent(colName);
+  
+    try {
+      const topRes = await conn.query(`
+        SELECT
+          COALESCE(CAST(${col} AS VARCHAR), '(NULL)') AS value,
+          COUNT(*)::BIGINT AS n
+        FROM tablename
+        GROUP BY 1
+        ORDER BY n DESC
+        LIMIT ${k};
+      `);
+  
+      const points = (topRes.toArray() as any[]).map((r) => ({
+        label: String(r.value),
+        count: Number(r.n),
+      }));
+  
+      return { kind: "bar", points };
+    } finally {
+      await conn.close();
+    }
+  }

@@ -1,7 +1,24 @@
 "use client";
 
-import { useState } from "react";
-import { loadCSVAsTablename, runSQL, getSchema, getColumnStats, QueryResult, ColumnInfo, ColumnStats } from "@/lib/engine";
+import { useState, useEffect } from "react";
+import {
+  loadCSVAsTablename,
+  runSQL,
+  getSchema,
+  getColumnStats,
+  QueryResult,
+  ColumnInfo,
+  ColumnStats,
+  getNumericHistogram,
+  getCategoricalBar,
+  HistogramData,
+  BarData,
+  StepStatus,
+  E2EStep,
+} from "@/lib/engine";
+import { Bar } from "react-chartjs-2";
+import { Chart as ChartJS, registerables } from "chart.js";
+ChartJS.register(...registerables);
 
 // ---------------------------- L1: Up and Running -----------------------------
 export default function Home() {
@@ -18,6 +35,19 @@ export default function Home() {
   const [stats, setStats] = useState<Record<string, ColumnStats>>({});
   const [statsStatus, setStatsStatus] = useState<string>("Not computed");
   const [statsRunning, setStatsRunning] = useState<boolean>(false);
+
+  const [selectedCol, setSelectedCol] = useState<string>("");
+  const [chartStatus, setChartStatus] = useState<string>("Not generated");
+  const [chartData, setChartData] = useState<HistogramData | BarData | null>(null);
+
+  useEffect(() => {
+    if (!selectedCol && schema.length > 0) {
+      setSelectedCol(schema[0].name);
+    }
+  }, [schema, selectedCol]);
+
+  const [e2eRunning, setE2eRunning] = useState(false);
+  const [e2eSteps, setE2eSteps] = useState<E2EStep[]>([]);
 
   // ---------------------------- L2: File Upload  -----------------------------
   async function onUpload(file: File) {
@@ -85,7 +115,129 @@ export default function Home() {
     }
   }
 
+  // ----------------------------- L8: Charting ------------------------------
+  async function generateChart() {
+    if (!selectedCol) return;
+    const s = stats[selectedCol];
+    if (!s) {
+      setChartStatus("Compute stats first (Charts uses stats to decide what to show).");
+      return;
+    }
 
+    setChartStatus("Generating chart...");
+    setChartData(null);
+
+    try {
+      if (s.kind === "numeric") {
+        const min = s.min ?? 0;
+        const max = s.max ?? 0;
+        const h = await getNumericHistogram(selectedCol, min, max, 20);
+        setChartData(h);
+      } else {
+        const b = await getCategoricalBar(selectedCol, 15);
+        setChartData(b);
+      }
+      setChartStatus("Done ✅");
+    } catch (e: any) {
+      setChartStatus("Failed ❌");
+      setError(e?.message ?? String(e));
+    }
+  }
+
+  // To help with Featured Insight
+  function hasCol(name: string) {
+    return schema.some((c) => c.name.toLowerCase() === name.toLowerCase());
+  }
+
+  function setStep(idx: number, patch: Partial<E2EStep>) {
+    setE2eSteps((prev) => {
+      const copy = [...prev];
+      copy[idx] = { ...copy[idx], ...patch };
+      return copy;
+    });
+  }
+
+  // ----------------------------- E2E Testing ------------------------------
+  async function runE2ETest() {
+    setError(null);
+    setResult(null);
+    setE2eRunning(true);
+
+    // Define steps up front
+    const steps: E2EStep[] = [
+      { name: "Create test CSV", status: "pending" },
+      { name: "Upload + create tablename", status: "pending" },
+      { name: "Run SQL query", status: "pending" },
+      { name: "Compute stats", status: "pending" },
+      { name: "Generate chart data", status: "pending" },
+    ];
+    setE2eSteps(steps);
+
+    try {
+      // 1) Create test CSV (10+ columns, mix numeric/categorical)
+      const TEST_CSV = [
+        "trip_id,category,value,tip_amount,total_amount,PULocationID,DOLocationID,passenger_count,payment_type,day_of_week,is_rush_hour",
+        "1,A,10,2,20,138,161,1,1,Mon,true",
+        "2,A,12,0,18,138,236,2,2,Tue,false",
+        "3,B,8,1,12,236,161,1,1,Wed,true",
+        "4,B,30,5,45,161,100,3,1,Thu,true",
+        "5,C,22,3,28,100,161,1,2,Fri,false",
+        "6,C,18,0,18,100,236,2,2,Sat,false",
+        "7,A,40,10,60,138,161,1,1,Sun,true",
+        "8,B,5,0,5,236,100,1,2,Mon,false",
+        "9,C,16,2,22,161,138,2,1,Tue,true",
+        "10,A,9,1,11,138,161,1,1,Wed,false",
+      ].join("\n");
+
+      setStep(0, { status: "pass", detail: "CSV created in memory" });
+
+      const file = new File([TEST_CSV], "e2e_test.csv", { type: "text/csv" });
+
+      // 2) Upload + create tablename
+      try {
+        await onUpload(file);
+        setStep(1, { status: "pass", detail: "tablename created" });
+      } catch (e: any) {
+        setStep(1, { status: "fail", detail: e?.message ?? String(e) });
+        throw e;
+      }
+
+      // 3) Run SQL query
+      try {
+        const q = "SELECT COUNT(*) AS n FROM tablename;";
+        setSql(q);
+        await onRun(); // relies on current sql state; if your onRun reads sql state, this is fine.
+        setStep(2, { status: "pass", detail: "COUNT(*) executed" });
+      } catch (e: any) {
+        setStep(2, { status: "fail", detail: e?.message ?? String(e) });
+        throw e;
+      }
+
+      // 4) Compute stats
+      try {
+        await computeStats();
+        setStep(3, { status: "pass", detail: "Stats computed" });
+      } catch (e: any) {
+        setStep(3, { status: "fail", detail: e?.message ?? String(e) });
+        throw e;
+      }
+
+      // 5) Generate chart data
+      try {
+        // pick a numeric column that exists in test CSV
+        setSelectedCol("value");
+        await generateChart();
+        setStep(4, { status: "pass", detail: "Chart data generated" });
+      } catch (e: any) {
+        setStep(4, { status: "fail", detail: e?.message ?? String(e) });
+        throw e;
+      }
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setE2eRunning(false);
+    }
+  }
 
   return (
     <div style={{ padding: 24, fontFamily: "system-ui" }}>
@@ -93,12 +245,36 @@ export default function Home() {
 
       {/* Header row (keep your existing upload/status UI) */}
       <div style={{ display: "flex", gap: 16, alignItems: "center", marginBottom: 16 }}>
+        {/* Pretty Upload Button */}
+        <label
+          htmlFor="csv-upload"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 12px",
+            borderRadius: 10,
+            background: "#2563eb",
+            color: "white",
+            fontWeight: 600,
+            fontSize: 14,
+            cursor: "pointer",
+            border: "1px solid rgba(0,0,0,0.08)",
+          }}
+        >
+          Upload CSV
+        </label>
+        {/* Hidden file input */}
         <input
+          id="csv-upload"
           type="file"
           accept=".csv"
+          style={{ display: "none" }}
           onChange={(e) => {
             const f = e.target.files?.[0];
             if (f) void onUpload(f);
+            // optional: allow re-uploading the same file without refreshing
+            e.currentTarget.value = "";
           }}
         />
         {fileName && (
@@ -109,7 +285,47 @@ export default function Home() {
         <span>
           Status: <b>{status}</b>
         </span>
+        {/* E2E Testing Button*/}
+        <button
+          onClick={() => void runE2ETest()}
+          disabled={e2eRunning}
+          style={{
+            padding: "8px 12px",
+            marginLeft: "auto",
+            borderRadius: 10,
+            border: "1px solid #ccc",
+            background: e2eRunning ? "#f3f4f6" : "#111",
+            color: e2eRunning ? "#666" : "#fff",
+            cursor: e2eRunning ? "not-allowed" : "pointer",
+            fontWeight: 600,
+            fontSize: 14,
+          }}
+        >
+          {e2eRunning ? "Running E2E..." : "Run End-to-End Test"}
+        </button>
       </div>
+
+      {/* E2E Testing Output */}
+      {e2eSteps.length > 0 && (
+        <div style={{ marginBottom: 16, border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>End-to-End Test</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {e2eSteps.map((s, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                <div>
+                  <b>
+                    {s.status === "pass" ? "✅" : s.status === "fail" ? "❌" : s.status === "skipped" ? "⏭️" : "⏳"}
+                  </b>{" "}
+                  {s.name}
+                </div>
+                <div style={{ color: "#666", fontSize: 12, maxWidth: 520, textAlign: "right" }}>
+                  {s.detail ?? ""}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Body: 2 columns */}
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, alignItems: "start" }}>
@@ -132,6 +348,35 @@ export default function Home() {
             <div style={{ marginTop: 8 }}>
               <button onClick={() => void onRun()} style={{ padding: "8px 12px" }}>
                 Run Query
+              </button>
+              {/* "Featured Insight" Button */}
+              <button
+                onClick={() => {
+                  if (!hasCol("tip_amount") || !hasCol("total_amount")) {
+                    setError("Featured Insight requires tip_amount and total_amount columns.");
+                    return;
+                  }
+                  const groupCol = hasCol("PULocationID") ? "PULocationID" : null;
+                  if (!groupCol) {
+                    setError("Featured Insight requires PULocationID (pickup zone) column.");
+                    return;
+                  }
+                  const q = `SELECT
+                  ${groupCol},
+  ROUND(AVG(tip_amount / NULLIF(total_amount, 0)), 4) AS avg_tip_rate,
+  COUNT(*) AS trips
+  FROM tablename
+  WHERE total_amount > 0
+  GROUP BY 1
+  HAVING COUNT(*) > 5000
+  ORDER BY avg_tip_rate DESC
+  LIMIT 20;`;
+                  setSql(q);
+                  void onRun();
+                }}
+                style={{ padding: "8px 12px", marginLeft: 8 }}
+              >
+                Run Featured Insight
               </button>
               <span style={{ marginLeft: 12, color: "#555" }}>
                 (If you don’t write LIMIT, we auto-cap results to 1000 rows)
@@ -312,7 +557,72 @@ export default function Home() {
               </div>
             </>
           )}
-          {activeTab === "Charts" && <p style={{ color: "#666" }}>Next: distributions only where meaningful.</p>}
+          {/* ------------------------ L8: Charting ------------------------*/}
+          {activeTab === "Charts" && (
+            <>
+              <div style={{ fontWeight: 600, marginBottom: 8 }}>Distributions</div>
+
+              {Object.keys(stats).length === 0 ? (
+                <p style={{ color: "#666" }}>Compute stats first (Charts depends on column types + min/max).</p>
+              ) : (
+                <>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <select
+                      value={selectedCol}
+                      onChange={(e) => setSelectedCol(e.target.value)}
+                      style={{ padding: 8, borderRadius: 8, border: "1px solid #ccc" }}
+                    >
+                      <option value="" disabled>Select a column</option>
+                      {schema.map((c) => (
+                        <option key={c.name} value={c.name}>{c.name}</option>
+                      ))}
+                    </select>
+
+                    <button onClick={() => void generateChart()} style={{ padding: "8px 12px" }}>
+                      Generate chart
+                    </button>
+                  </div>
+
+                  <div style={{ marginTop: 8, color: "#555", fontSize: 13 }}>
+                    Status: <b>{chartStatus}</b>
+                  </div>
+
+                  <div style={{ marginTop: 12, height: 260 }}>
+                    {chartData?.kind === "histogram" && (
+                      <Bar
+                        data={{
+                          labels: chartData.bins.map((b) => b.label),
+                          datasets: [{ label: "Count", data: chartData.bins.map((b) => b.count) }],
+                        }}
+                        options={{
+                          responsive: true,
+                          maintainAspectRatio: false,
+                          plugins: { legend: { display: false } },
+                          scales: { x: { ticks: { maxRotation: 90, minRotation: 60 } } },
+                        }}
+                      />
+                    )}
+
+                    {chartData?.kind === "bar" && (
+                      <Bar
+                        data={{
+                          labels: chartData.points.map((p) => p.label.length > 20 ? p.label.slice(0, 20) + "…" : p.label),
+                          datasets: [{ label: "Count", data: chartData.points.map((p) => p.count) }],
+                        }}
+                        options={{
+                          responsive: true,
+                          maintainAspectRatio: false,
+                          plugins: { legend: { display: false } },
+                        }}
+                      />
+                    )}
+
+                    {!chartData && <p style={{ color: "#666" }}>Pick a column and click “Generate chart”.</p>}
+                  </div>
+                </>
+              )}
+            </>
+          )}
           {activeTab === "Chat" && <p style={{ color: "#666" }}>Next: Gemini-powered assistant.</p>}
         </div>
       </div>
