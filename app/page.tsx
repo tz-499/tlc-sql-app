@@ -361,8 +361,7 @@ export default function Home() {
                     setError("Featured Insight requires PULocationID (pickup zone) column.");
                     return;
                   }
-                  const q = `SELECT
-                  ${groupCol},
+                  const q = `SELECT My ${groupCol},
   ROUND(AVG(tip_amount / NULLIF(total_amount, 0)), 4) AS avg_tip_rate,
   COUNT(*) AS trips
   FROM tablename
@@ -409,7 +408,10 @@ export default function Home() {
                           style={{
                             position: "sticky",
                             top: 0,
-                            background: "#f4f4f4",
+                            background: "#fafafa",
+                            color: "#111",
+                            fontSize: 13,
+                            letterSpacing: "0.01em",
                             textAlign: "left",
                             padding: 8,
                             borderBottom: "1px solid #ddd",
