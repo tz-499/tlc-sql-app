@@ -361,7 +361,7 @@ export default function Home() {
                     setError("Featured Insight requires PULocationID (pickup zone) column.");
                     return;
                   }
-                  const q = `SELECT My ${groupCol},
+                  const q = `SELECT ${groupCol},
   ROUND(AVG(tip_amount / NULLIF(total_amount, 0)), 4) AS avg_tip_rate,
   COUNT(*) AS trips
   FROM tablename
